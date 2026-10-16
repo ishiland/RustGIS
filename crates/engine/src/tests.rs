@@ -3121,6 +3121,40 @@ fn tools_read_streamed_layers_whole() {
 }
 
 #[test]
+fn web_style_carries_the_layers_scale_limits_as_zooms() {
+    let mut s = world();
+    let id = s.map().layer_by_name("Cities").unwrap().id;
+    let zooms = |s: &Session| {
+        let style = crate::cmd::sharing::web_style(s.map().layer(id).unwrap());
+        style["layers"].as_array().unwrap().iter().map(|l| (l.get("minzoom").cloned(), l.get("maxzoom").cloned())).collect::<Vec<_>>()
+    };
+    // No limits, no keys.
+    assert!(zooms(&s).iter().all(|(a, b)| a.is_none() && b.is_none()));
+    let c = s.map().layer(id).unwrap().extent().center();
+    // Ground metres per pixel at the layer's latitude, and the MapLibre zoom (512-pixel world).
+    let zoom_of = |scale: f64| (2.0 * std::f64::consts::PI * 6_378_137.0 * c.y.to_radians().cos() / (512.0 * scale * 0.00028)).log2();
+    let l = s.map_mut().layer_mut(id).unwrap();
+    l.min_scale = Some(5_000_000.0);
+    l.max_scale = Some(100_000.0);
+    l.labels.enabled = true;
+    l.labels.field = "name".into();
+    let z = zooms(&s);
+    // The label layer is limited like the symbols.
+    assert!(z.len() >= 2, "{z:?}");
+    for (min, max) in z {
+        assert!((min.as_ref().unwrap().as_f64().unwrap() - zoom_of(5_000_000.0)).abs() < 1e-3, "{min:?}");
+        assert!((max.as_ref().unwrap().as_f64().unwrap() - zoom_of(100_000.0)).abs() < 1e-3, "{max:?}");
+    }
+    // One limit gives one key; nonsense gives none.
+    let l = s.map_mut().layer_mut(id).unwrap();
+    l.max_scale = Some(f64::NAN);
+    l.min_scale = Some(-1.0);
+    assert!(zooms(&s).iter().all(|(a, b)| a.is_none() && b.is_none()));
+    s.map_mut().layer_mut(id).unwrap().max_scale = Some(100_000.0);
+    assert!(zooms(&s).iter().all(|(a, b)| a.is_none() && b.is_some()));
+}
+
+#[test]
 fn a_streamed_layer_whose_file_goes_away_shows_an_error_not_stale_features() {
     let path = grid_fgb("vanishing", 40);
     let mut s = Session::new(Project::default());
