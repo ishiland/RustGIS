@@ -106,18 +106,22 @@ fn resized((x, y, w, h): (f64, f64, f64, f64), handle: usize, dx: f64, dy: f64) 
     (x0.min(x1), y0.min(y1), w, h)
 }
 
+/// The layout to show, copied from the project only when it has changed since the last copy.
+fn shown_layout(app: &mut RustGisApp, li: usize) -> Option<std::rc::Rc<Layout>> {
+    let rev = app.session.revision;
+    match &app.layout.shown {
+        Some((i, r, l)) if *i == li && *r == rev => Some(l.clone()),
+        _ => {
+            let l = std::rc::Rc::new(app.session.project.layouts.get(li).cloned()?);
+            app.layout.shown = Some((li, rev, l.clone()));
+            Some(l)
+        }
+    }
+}
+
 pub fn show(app: &mut RustGisApp, ui: &mut Ui) {
     let Some(li) = app.session.active_layout else { return };
-    let rev = app.session.revision;
-    let layout = match &app.layout.shown {
-        Some((i, r, l)) if *i == li && *r == rev => l.clone(),
-        _ => {
-            let Some(l) = app.session.project.layouts.get(li).cloned() else { return };
-            let l = std::rc::Rc::new(l);
-            app.layout.shown = Some((li, rev, l.clone()));
-            l
-        }
-    };
+    let Some(layout) = shown_layout(app, li) else { return };
     let t = Tokens::get(ui.ctx());
     if app.layout.selected.is_some_and(|id| layout.element(id).is_none()) {
         app.layout.selected = None;
@@ -131,11 +135,17 @@ pub fn show(app: &mut RustGisApp, ui: &mut Ui) {
             .show(ui, |ui| properties(app, ui, &layout, li));
     }
     let area = ui.available_rect_before_wrap();
-    let resp = ui.allocate_rect(area, Sense::click_and_drag());
+    // A stable id: dragging an element selects it and opens the properties beside the page,
+    // and an automatic id would change with them, losing the drag before it is dropped (#325).
+    ui.advance_cursor_after_rect(area);
+    let resp = ui.interact(area, ui.id().with("layout_page"), Sense::click_and_drag());
     let painter = ui.painter_at(area);
     painter.rect_filled(area, 0.0, if t.dark { Color32::from_gray(38) } else { Color32::from_rgb(0xD9, 0xDD, 0xE3) });
     let (page, s) = page_rect(&app.layout, area, &layout);
     interact(app, ui, &resp, &layout, li, page, s);
+    // The properties or a drag may have just changed the layout: draw the page as it is now,
+    // or the texture would be keyed to the new revision but show the old layout (#325).
+    let Some(layout) = shown_layout(app, li) else { return };
     let (page, s) = page_rect(&app.layout, area, &layout);
 
     // Render the page at screen resolution when it changes.
@@ -563,7 +573,62 @@ fn properties(app: &mut RustGisApp, ui: &mut Ui, layout: &Layout, li: usize) {
 
 #[cfg(test)]
 mod tests {
-    use super::resized;
+    use super::{page_rect, resized, to_screen};
+    use crate::RustGisApp;
+    use egui::{Event, Modifiers, PointerButton, Pos2, Rect, vec2};
+    use serde_json::json;
+    use std::{cell::Cell, rc::Rc};
+
+    /// Dragging an element redraws the page with it where it was dropped (#325).
+    #[test]
+    fn dropped_element_is_drawn_where_it_lands() {
+        let mut app = RustGisApp::with_sample();
+        app.run("layout.new", json!({"name": "Drag"})).unwrap();
+        let area = Rc::new(Cell::new(Rect::NOTHING));
+        let shown = area.clone();
+        // Fonts take effect on the frame after they are installed.
+        let mut fonts = false;
+        let mut h = egui_kittest::Harness::builder().with_size(vec2(1000.0, 760.0)).build_ui_state(
+            move |ui, app: &mut RustGisApp| {
+                if !fonts {
+                    crate::theme::install_fonts(ui.ctx(), &[], None);
+                    fonts = true;
+                    return;
+                }
+                shown.set(ui.available_rect_before_wrap());
+                super::show(app, ui);
+            },
+            app,
+        );
+        h.run_steps(3);
+        let li = h.state().session.active_layout.unwrap();
+        let layout = h.state().session.project.layouts[li].clone();
+        let title = layout.elements.iter().find(|e| e.name == "Title").unwrap().clone();
+        let (page, s) = page_rect(&h.state().layout, area.get(), &layout);
+        let from = to_screen(page, s, (title.x + title.w / 2.0, title.y + title.h / 2.0));
+        let to = from + vec2(0.0, 120.0);
+        let button = |pos: Pos2, pressed| Event::PointerButton { pos, button: PointerButton::Primary, pressed, modifiers: Modifiers::NONE };
+        h.event(Event::PointerMoved(from));
+        h.step();
+        h.event(button(from, true));
+        h.step();
+        for i in 1..=6 {
+            h.event(Event::PointerMoved(from + (to - from) * i as f32 / 6.0));
+            h.step();
+        }
+        let before = h.state().session.revision;
+        h.event(button(to, false));
+        h.step();
+        let app = h.state();
+        assert!(app.session.revision > before, "the drop should update the layout");
+        let moved = app.session.project.layouts[li].element(title.id).unwrap();
+        assert!(moved.y > title.y + 10.0);
+        // The page was drawn, and keyed, from the layout as it is after the drop.
+        let (i, rev, drawn) = app.layout.shown.as_ref().unwrap();
+        assert_eq!((*i, *rev), (li, app.session.revision));
+        assert_eq!(drawn.element(title.id).map(|e| e.y), Some(moved.y));
+        assert_eq!(app.layout.key.map(|k| k.0), Some(app.session.revision));
+    }
 
     #[test]
     fn widening_a_hairline_keeps_it_thin() {
