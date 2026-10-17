@@ -196,6 +196,35 @@ pub fn features_answer(s: &mut Session, name: &str, bytes: Vec<u8>) -> Vec<u8> {
     rustgis_data::ogc::fix_axes(&bytes).unwrap_or(bytes)
 }
 
+/// A service's features at `url`, with the pages its `next` links lead to: at most `max` bytes
+/// in all, and [`BLOCKING_TIMEOUT`](crate::render::rustgis_tiles::cache::BLOCKING_TIMEOUT) for
+/// the pages after the first. A `next` link is fetched only where its page may point.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn download_features(s: &mut Session, name: &str, url: &str, max: usize) -> Result<Vec<u8>, String> {
+    use crate::render::rustgis_tiles::{address, cache};
+    let first = cache::download_blocking_limited(url, max).map_err(|e| format!("{url}: {e}"))?;
+    let mut left = max.saturating_sub(first.len());
+    let until = std::time::Instant::now() + cache::BLOCKING_TIMEOUT;
+    let mut from = url.to_string();
+    let (bytes, note) = rustgis_data::ogc::join_pages(url, first, rustgis_data::ogc::MAX_PAGED_FEATURES, |next| {
+        address::check(next, Some(&from))?;
+        if std::time::Instant::now() >= until {
+            return Err("the pages took over a minute".into());
+        }
+        let page = cache::download_blocking_limited(next, left)?;
+        if page.len() > left {
+            return Err("the pages are larger than RustGIS downloads".into());
+        }
+        left -= page.len();
+        from = next.to_string();
+        Ok(page)
+    });
+    if let Some(note) = note {
+        s.notify(format!("{name}: {note}"), false);
+    }
+    Ok(bytes)
+}
+
 /// A tile template given for a service's layer: a web address with `{z}`, `{x}` and `{y}`, that
 /// the service's document may point to.
 fn checked_template(service: &str, t: &str) -> Result<String, String> {
@@ -328,8 +357,8 @@ pub(crate) fn add(s: &mut Session, p: &Value) -> CmdResult {
             }
             #[cfg(not(target_arch = "wasm32"))]
             {
-                // `download_blocking` is bounded: MAX_DOWNLOAD bytes and BLOCKING_TIMEOUT.
-                let bytes = crate::render::rustgis_tiles::cache::download_blocking(items).map_err(|e| format!("{items}: {e}"))?;
+                let max = crate::render::rustgis_tiles::cache::MAX_DOWNLOAD;
+                let bytes = download_features(s, &name, items, max)?;
                 let bytes = features_answer(s, &name, bytes);
                 let r = super::raster::add_named_bytes(s, &json!({"name": name}), format!("{name}.geojson"), bytes)?;
                 zoom(s);

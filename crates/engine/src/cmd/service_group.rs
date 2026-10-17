@@ -125,12 +125,12 @@ fn listing(s: &mut Session, p: &Value) -> CmdResult {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn download(url: &str, max: usize) -> Result<Vec<u8>, String> {
-    crate::render::rustgis_tiles::cache::download_blocking_limited(url, max)
+fn download(s: &mut Session, name: &str, url: &str, max: usize) -> Result<Vec<u8>, String> {
+    super::download_features(s, name, url, max)
 }
 
 #[cfg(target_arch = "wasm32")]
-fn download(_: &str, _: usize) -> Result<Vec<u8>, String> {
+fn download(_: &mut Session, _: &str, _: &str, _: usize) -> Result<Vec<u8>, String> {
     Err("the browser must supply downloaded feature responses".into())
 }
 
@@ -161,7 +161,7 @@ fn read(s: &mut Session, p: &Value) -> Result<(Value, Vec<(ServiceChild, Dataset
                 }
                 text.as_bytes().to_vec()
             }
-            None => download(url, MAX_GROUP_BYTES.saturating_sub(bytes_read))?,
+            None => download(s, name, url, MAX_GROUP_BYTES.saturating_sub(bytes_read))?,
         };
         bytes_read = bytes_read.saturating_add(bytes.len());
         if bytes_read > MAX_GROUP_BYTES {

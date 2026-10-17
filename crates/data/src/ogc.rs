@@ -1294,7 +1294,11 @@ fn ogc_api(url: &str, v: &serde_json::Value) -> Result<Service, String> {
     }
     service.incomplete = unreadable > 0 || collections.len() > MAX_LAYERS;
     if service.layers.iter().any(|l| matches!(l.offer, Offer::Features { .. })) {
-        service.notes.push(format!("a collection is read up to {OGC_API_LIMIT} features (one page of the server's)"));
+        service.notes.push(if cfg!(target_arch = "wasm32") {
+            format!("a collection is read up to {OGC_API_LIMIT} features (one page of the server's)")
+        } else {
+            format!("a collection is read up to {MAX_PAGED_FEATURES} features, page by page")
+        });
     }
     if tiled > 0 {
         service.kind = if service.layers.iter().any(|l| matches!(l.offer, Offer::Features { .. })) {
@@ -1489,6 +1493,73 @@ pub fn partial_note(bytes: &[u8]) -> Option<String> {
     }
     let next = |t: &str| t.contains("\"rel\":\"next\"") || t.contains("\"rel\": \"next\"");
     (next(&head) || next(&tail)).then(|| "the server sent one page of its features; the rest aren't read".into())
+}
+
+/// Most features read from a collection that comes in pages.
+pub const MAX_PAGED_FEATURES: usize = 100_000;
+
+/// A feature collection page's JSON `next` link, resolved against the page's address.
+fn next_page(url: &str, page: &serde_json::Value) -> Option<String> {
+    let link = page.get("links")?.as_array()?.iter().find(|l| {
+        l.get("rel").and_then(|r| r.as_str()) == Some("next") && l.get("type").and_then(|t| t.as_str()).is_none_or(|t| t.contains("json"))
+    })?;
+    resolve(url, link.get("href")?.as_str()?)
+}
+
+/// A feature collection read page by page: `first` (from `url`), then each `next` page `get`
+/// returns, up to `max` features. The pages' features in one collection, with the first page's
+/// other members and without its paging ones, and a note when some features were left unread. A
+/// first page without a `next` link comes back unchanged.
+pub fn join_pages(
+    url: &str,
+    first: Vec<u8>,
+    max: usize,
+    mut get: impl FnMut(&str) -> Result<Vec<u8>, String>,
+) -> (Vec<u8>, Option<String>) {
+    let (head, tail) = edges(&first);
+    if !(head.contains("\"next\"") || tail.contains("\"next\"")) {
+        return (first, None);
+    }
+    let Ok(mut doc) = serde_json::from_slice::<serde_json::Value>(&first) else { return (first, None) };
+    let Some(mut next) = next_page(url, &doc) else { return (first, None) };
+    let Some(mut features) = doc.get_mut("features").and_then(|f| f.as_array_mut()).map(std::mem::take) else {
+        return (first, None);
+    };
+    let mut seen = std::collections::HashSet::from([url.to_string()]);
+    let note = loop {
+        if features.len() >= max {
+            break Some(format!("the first {max} features are read; the rest aren't"));
+        }
+        if !seen.insert(next.clone()) {
+            break Some("the service's pages lead back to an earlier page; the rest aren't read".into());
+        }
+        let mut page = match get(&next).and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).map_err(|e| e.to_string())) {
+            Ok(page) => page,
+            Err(e) => break Some(format!("the page after feature {} couldn't be read ({e}); the rest aren't read", features.len())),
+        };
+        let Some(more) = page.get_mut("features").and_then(|f| f.as_array_mut()).map(std::mem::take) else {
+            break Some(format!("the page after feature {} isn't a feature collection; the rest aren't read", features.len()));
+        };
+        features.extend(more);
+        if features.len() > max {
+            features.truncate(max);
+            break Some(format!("the first {max} features are read; the rest aren't"));
+        }
+        match next_page(&next, &page) {
+            Some(n) => next = n,
+            None => break None,
+        }
+    };
+    if let Some(members) = doc.as_object_mut() {
+        for paging in ["links", "numberMatched", "numberReturned"] {
+            members.remove(paging);
+        }
+        members.insert("features".into(), serde_json::Value::Array(features));
+    }
+    match serde_json::to_vec(&doc) {
+        Ok(joined) => (joined, note),
+        Err(_) => (first, None),
+    }
 }
 
 /// Whether a GeoJSON answer names, as its `crs`, EPSG:4326 in the URN form that puts latitude
@@ -1765,6 +1836,51 @@ mod tests {
             .is_none()
         );
         assert!(partial_note(b"").is_none());
+    }
+
+    #[test]
+    fn pages_joined_up_to_a_limit() {
+        // Page n holds features 2n and 2n + 1; its JSON `next` link is relative.
+        let page = |n: u64, next: Option<&str>| {
+            let mut p = serde_json::json!({"type": "FeatureCollection", "numberMatched": 6, "numberReturned": 2,
+                "features": [{"id": 2 * n}, {"id": 2 * n + 1}]});
+            if let Some(h) = next {
+                p["links"] = serde_json::json!([{"rel": "next", "type": "text/html", "href": "x.html"},
+                    {"rel": "next", "type": "application/geo+json", "href": h}]);
+            }
+            serde_json::to_vec(&p).unwrap()
+        };
+        let url = "https://api.example.org/collections/a/items?limit=2";
+        let mut get = |u: &str| match u {
+            "https://api.example.org/collections/a/items?page=1" => Ok(page(1, Some("items?page=2"))),
+            "https://api.example.org/collections/a/items?page=2" => Ok(page(2, None)),
+            "https://api.example.org/collections/a/items?page=9" => Ok(page(9, Some(url))),
+            _ => Err("http status: 404".to_string()),
+        };
+        let ids = |b: &[u8]| -> Vec<u64> {
+            let v: serde_json::Value = serde_json::from_slice(b).unwrap();
+            v["features"].as_array().unwrap().iter().map(|f| f["id"].as_u64().unwrap()).collect()
+        };
+        let (joined, note) = join_pages(url, page(0, Some("items?page=1")), 100, &mut get);
+        assert_eq!((ids(&joined), note), (vec![0, 1, 2, 3, 4, 5], None));
+        let v: serde_json::Value = serde_json::from_slice(&joined).unwrap();
+        assert!(v["type"] == "FeatureCollection" && v.get("links").is_none() && v.get("numberMatched").is_none());
+        assert!(partial_note(&joined).is_none());
+        let (joined, note) = join_pages(url, page(0, Some("items?page=1")), 3, &mut get);
+        assert_eq!(ids(&joined), [0, 1, 2]);
+        assert!(note.is_some_and(|n| n.contains("first 3 features")));
+        let (joined, note) = join_pages(url, page(0, Some("items?page=9")), 100, &mut get);
+        assert_eq!(ids(&joined), [0, 1, 18, 19]);
+        assert!(note.is_some_and(|n| n.contains("lead back")));
+        let (joined, note) = join_pages(url, page(0, Some("items?page=4")), 100, &mut get);
+        assert_eq!(ids(&joined), [0, 1]);
+        assert!(note.is_some_and(|n| n.contains("after feature 2 couldn't be read (http status: 404)")));
+        // One page, or a `next` link that isn't JSON: the answer as it came.
+        let unasked = |_: &str| -> Result<Vec<u8>, String> { panic!("no page is asked for") };
+        let single = page(0, None);
+        assert_eq!(join_pages(url, single.clone(), 100, unasked), (single, None));
+        let html_only = br#"{"type":"FeatureCollection","features":[],"links":[{"rel":"next","type":"text/html","href":"p2"}]}"#;
+        assert_eq!(join_pages(url, html_only.to_vec(), 100, unasked), (html_only.to_vec(), None));
     }
 
     #[test]

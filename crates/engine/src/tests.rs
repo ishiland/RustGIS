@@ -5138,6 +5138,44 @@ fn services_list_and_add_layers() {
     }
 }
 
+/// An OGC API collection that comes in pages is read page by page, and a `next` link is followed
+/// only where the page may point.
+#[test]
+fn ogc_api_features_follow_next_pages() {
+    let page = |ids: &[u32], next: Option<&str>| {
+        let features: Vec<Value> = ids
+            .iter()
+            .map(|&i| json!({"type": "Feature", "properties": {"n": i}, "geometry": {"type": "Point", "coordinates": [i, 1]}}))
+            .collect();
+        let mut p = json!({"type": "FeatureCollection", "numberMatched": 5, "numberReturned": ids.len(), "features": features});
+        if let Some(h) = next {
+            p["links"] = json!([{"rel": "next", "type": "application/geo+json", "href": h}]);
+        }
+        p.to_string()
+    };
+    let base = serve_routes(
+        vec![
+            ("/collections/wells/items?page=2", page(&[3, 4], Some("{base}/collections/wells/items?page=3"))),
+            ("/collections/wells/items?page=3", page(&[5], None)),
+            ("/collections/wells/items", page(&[1, 2], Some("items?page=2"))),
+            ("/collections/inward/items", page(&[1, 2], Some("http://169.254.169.254/latest/meta-data/"))),
+        ],
+        4,
+    );
+    let collections = format!(
+        r#"{{"collections": [{{"id": "wells", "title": "Wells", "links": [{{"rel": "items", "href": "{base}/collections/wells/items"}}]}},
+        {{"id": "inward", "title": "Inward", "links": [{{"rel": "items", "href": "{base}/collections/inward/items"}}]}}]}}"#
+    );
+    let mut s = Session::new(Project::default());
+    let api = format!("{base}/collections");
+    let r = s.run("service.add", &json!({"url": api, "layer": "wells", "text": collections})).unwrap();
+    assert_eq!(r["features"], 5);
+    assert!(!s.notices.iter().any(|n| n.text.contains("aren't read")), "{:?}", s.notices.iter().map(|n| &n.text).collect::<Vec<_>>());
+    let r = s.run("service.add", &json!({"url": api, "layer": "inward", "text": collections})).unwrap();
+    assert_eq!(r["features"], 2);
+    assert!(s.notices.iter().any(|n| n.text.starts_with("Inward: ") && n.text.contains("never fetched")));
+}
+
 /// A WCS coverage (from a local server) becomes a raster of the view, asked for in EPSG:4326 within
 /// its bounds; an error answer is refused. A catalogue's records come with the links RustGIS can
 /// follow, those pointing inward left out.
