@@ -150,8 +150,8 @@ For callers that fetch documents themselves (including the web app), `service.la
 responses. It returns `next` while another collections document is needed; supplied documents
 never cause a blocking capabilities fetch. Each listed layer includes `source_url`; pass it
 and the same documents to `service.add` to distinguish layers with the same name. Discovery
-follows at most four documents and rejects loops and disallowed addresses. Feature downloads
-retain their existing limits; this does not add collection-list or feature pagination.
+follows at most four documents and rejects loops and disallowed addresses. Collection lists
+aren't paged. On the desktop, feature downloads follow their `next` pages (see the table above).
 
 ### Catalogues
 
