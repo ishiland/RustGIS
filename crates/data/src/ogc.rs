@@ -1528,6 +1528,7 @@ pub fn join_pages(
     let mut seen = std::collections::HashSet::from([url.to_string()]);
     let note = loop {
         if features.len() >= max {
+            features.truncate(max);
             break Some(format!("the first {max} features are read; the rest aren't"));
         }
         if !seen.insert(next.clone()) {
@@ -1875,8 +1876,11 @@ mod tests {
         let (joined, note) = join_pages(url, page(0, Some("items?page=4")), 100, &mut get);
         assert_eq!(ids(&joined), [0, 1]);
         assert!(note.is_some_and(|n| n.contains("after feature 2 couldn't be read (http status: 404)")));
-        // One page, or a `next` link that isn't JSON: the answer as it came.
         let unasked = |_: &str| -> Result<Vec<u8>, String> { panic!("no page is asked for") };
+        let (joined, note) = join_pages(url, page(0, Some("items?page=1")), 1, unasked);
+        assert_eq!(ids(&joined), [0]);
+        assert!(note.is_some_and(|n| n.contains("first 1 features")));
+        // One page, or a `next` link that isn't JSON: the answer as it came.
         let single = page(0, None);
         assert_eq!(join_pages(url, single.clone(), 100, unasked), (single, None));
         let html_only = br#"{"type":"FeatureCollection","features":[],"links":[{"rel":"next","type":"text/html","href":"p2"}]}"#;
