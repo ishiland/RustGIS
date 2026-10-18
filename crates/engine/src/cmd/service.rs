@@ -208,10 +208,11 @@ pub(crate) fn download_features(s: &mut Session, name: &str, url: &str, max: usi
     let mut from = url.to_string();
     let (bytes, note) = rustgis_data::ogc::join_pages(url, first, rustgis_data::ogc::MAX_PAGED_FEATURES, |next| {
         address::check(next, Some(&from))?;
-        if std::time::Instant::now() >= until {
-            return Err("the pages took over a minute".into());
+        let wait = until.saturating_duration_since(std::time::Instant::now());
+        if wait.is_zero() {
+            return Err("the pages took too long".into());
         }
-        let page = cache::download_blocking_limited(next, left)?;
+        let page = cache::download_blocking_within(next, left, wait)?;
         if page.len() > left {
             return Err("the pages are larger than RustGIS downloads".into());
         }
