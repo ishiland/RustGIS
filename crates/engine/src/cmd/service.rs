@@ -197,14 +197,14 @@ pub fn features_answer(s: &mut Session, name: &str, bytes: Vec<u8>) -> Vec<u8> {
 }
 
 /// A service's features at `url`, with the pages its `next` links lead to: at most `max` bytes
-/// in all, and [`BLOCKING_TIMEOUT`](crate::render::rustgis_tiles::cache::BLOCKING_TIMEOUT) for
-/// the pages after the first. A `next` link is fetched only where its page may point.
+/// and [`BLOCKING_TIMEOUT`](crate::render::rustgis_tiles::cache::BLOCKING_TIMEOUT) in all. A
+/// `next` link is fetched only where its page may point.
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn download_features(s: &mut Session, name: &str, url: &str, max: usize) -> Result<Vec<u8>, String> {
     use crate::render::rustgis_tiles::{address, cache};
+    let until = std::time::Instant::now() + cache::BLOCKING_TIMEOUT;
     let first = cache::download_blocking_limited(url, max).map_err(|e| format!("{url}: {e}"))?;
     let mut left = max.saturating_sub(first.len());
-    let until = std::time::Instant::now() + cache::BLOCKING_TIMEOUT;
     let mut from = url.to_string();
     let (bytes, note) = rustgis_data::ogc::join_pages(url, first, rustgis_data::ogc::MAX_PAGED_FEATURES, |next| {
         address::check(next, Some(&from))?;
