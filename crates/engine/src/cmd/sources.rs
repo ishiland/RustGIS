@@ -41,7 +41,8 @@ fn adds_with(kind: &str) -> &'static str {
 
 fn shown(s: &Source) -> Value {
     let mut v = serde_json::to_value(s).unwrap_or(Value::Null);
-    v["addWith"] = json!(adds_with(&s.kind));
+    let service = s.kind == "url" && s.extra.get("service").and_then(Value::as_str) == Some("true");
+    v["addWith"] = json!(if service { "layer.addUrl {url, service: true}" } else { adds_with(&s.kind) });
     v
 }
 

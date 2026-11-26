@@ -922,7 +922,18 @@ pub fn added_by(id: &str, p: &Value) -> Option<Source> {
     let layer = |k: &str| text(p, k).map(|l| json!({k: l})).unwrap_or(Value::Null);
     match id {
         "layer.addData" => Some(src("file", text(p, "path")?, text(p, "name"), layer("layer"))),
-        "layer.addUrl" | "layer.addDownload" => Some(src("url", text(p, "url")?, text(p, "name"), layer("layer"))),
+        "layer.addUrl" | "layer.addDownload" => {
+            let mut extra = layer("layer");
+            // A service's features are read page by page; adding the address again without the
+            // flag would read only the first page.
+            if p.get("service").and_then(crate::cmd::bool_value) == Some(true) {
+                extra = json!({"service": "true"});
+                if let Some(l) = text(p, "layer") {
+                    extra["layer"] = json!(l);
+                }
+            }
+            Some(src("url", text(p, "url")?, text(p, "name"), extra))
+        }
         "map.addTiles" => {
             let url = text(p, "url")?;
             let mut extra = serde_json::Map::new();
@@ -1697,6 +1708,10 @@ MIIE
             added_by("service.add", &json!({"url": "https://h/wms", "layer": "a", "type": "wms"})).unwrap().extra,
             json!({"layer": "a", "type": "wms"})
         );
+        let service = json!({"url": "https://h/collections/a/items", "name": "A", "service": true});
+        assert_eq!(added_by("layer.addUrl", &service).unwrap().extra, json!({"service": "true"}));
+        assert_eq!(clean(added_by("layer.addDownload", &service).unwrap()).unwrap().extra, json!({"service": "true"}));
+        assert_eq!(added_by("layer.addUrl", &json!({"url": "https://h/a.geojson", "service": false})).unwrap().extra, Value::Null);
         assert!(added_by("layer.remove", &json!({})).is_none());
         assert!(added_by("layer.addData", &json!({})).is_none());
         assert!(library().iter().all(|(_, s)| clean(s.clone()).is_ok()));

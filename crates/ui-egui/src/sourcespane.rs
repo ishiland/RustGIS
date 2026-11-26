@@ -148,6 +148,9 @@ pub fn open(app: &mut RustGisApp, s: &Source) -> Result<(), String> {
             if let Some(l) = text(x, "layer") {
                 p["layer"] = json!(l);
             }
+            if text(x, "service") == Some("true") {
+                p["service"] = json!(true);
+            }
             app.run("ui.addUrl", p).map(|_| ())
         }
         "tiles" => {
@@ -515,4 +518,43 @@ pub fn show(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
             });
         });
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rustgis_engine::render::rustgis_tiles::{
+        address::{Origin, Reach},
+        cache,
+    };
+
+    /// A service's features added by address are read page by page when added again from Recent,
+    /// as they were the first time.
+    #[test]
+    fn a_service_read_by_address_is_read_in_pages_again_from_recent() {
+        let first = "https://recent-pages.example/collections/parcels/items";
+        let next = "https://recent-pages.example/collections/parcels/items?page=2";
+        let _turn = crate::fetching::turn();
+        cache::set_fetcher_with_origin(move |url, ceiling, done, _| {
+            let clean = cache::split_download_limit(&url).0.to_string();
+            let links = if clean == first { json!([{"rel":"next","type":"application/geo+json","href":next}]) } else { json!([]) };
+            let body = json!({"type":"FeatureCollection","features":[{"type":"Feature","geometry":{"type":"Point","coordinates":[0,0]},"properties":{}}],"links":links});
+            let origin = Origin::with_observed_reach(&clean, Reach::Public.min(ceiling)).unwrap();
+            done(Ok(cache::Fetched { bytes: body.to_string().into_bytes(), origin }));
+        });
+        let mut app = RustGisApp::new(rustgis_engine::Session::new(rustgis_engine::Project::default()));
+        let read = |app: &mut RustGisApp| {
+            for _ in 0..4 {
+                crate::serviceui::poll_pages(app, &egui::Context::default());
+            }
+            app.session.map().layers.last().map(|l| l.dataset.features.len())
+        };
+        app.run("ui.addUrl", json!({"url": first, "name": "Parcels", "service": true})).unwrap();
+        assert_eq!(read(&mut app), Some(2), "{:?}", app.dialogs.error);
+        let recent = app.session.sources.recent.first().cloned().unwrap();
+        assert_eq!((recent.kind.as_str(), recent.address.as_str()), ("url", first));
+        open(&mut app, &recent).unwrap();
+        assert_eq!(read(&mut app), Some(2), "{:?}", app.dialogs.error);
+        assert_eq!(app.session.map().layers.len(), 2);
+    }
 }
