@@ -148,8 +148,13 @@ pub fn open(app: &mut RustGisApp, s: &Source) -> Result<(), String> {
             if let Some(l) = text(x, "layer") {
                 p["layer"] = json!(l);
             }
-            if text(x, "service") == Some("true") {
-                p["service"] = json!(true);
+            for flag in rustgis_engine::sources::URL_FLAGS {
+                if s.flag(flag) {
+                    p[flag] = json!(true);
+                }
+            }
+            if let Some(crs) = text(x, "coverageCrs") {
+                p["coverageCrs"] = json!(crs);
             }
             app.run("ui.addUrl", p).map(|_| ())
         }
@@ -556,5 +561,20 @@ mod tests {
         open(&mut app, &recent).unwrap();
         assert_eq!(read(&mut app), Some(2), "{:?}", app.dialogs.error);
         assert_eq!(app.session.map().layers.len(), 2);
+    }
+
+    /// A WCS coverage added by address is asked for again from Recent as a coverage, in the system
+    /// it was asked in the first time.
+    #[test]
+    fn a_coverage_is_added_again_from_recent_in_the_system_it_was_asked_in() {
+        let _turn = crate::fetching::turn();
+        cache::set_fetcher(|_, _| {});
+        let mut app = RustGisApp::new(rustgis_engine::Session::new(rustgis_engine::Project::default()));
+        let url = "https://wcs-recent.invalid/wcs?SERVICE=WCS&VERSION=2.0.1&REQUEST=GetCoverage&COVERAGEID=dem";
+        let added = json!({"id": 1, "url": url, "name": "Terrain", "coverage": true, "coverageCrs": "EPSG:2056"});
+        let recent = rustgis_engine::sources::clean(rustgis_engine::sources::added_by("layer.addDownload", &added).unwrap()).unwrap();
+        open(&mut app, &recent).unwrap();
+        let asked = app.ui.downloads.last().map(|d| (d.params["coverage"].clone(), d.params["coverageCrs"].clone()));
+        assert_eq!(asked, Some((json!(true), json!("EPSG:2056"))));
     }
 }

@@ -506,7 +506,20 @@ fn same(a: &Source, b: &Source) -> bool {
     identity(&a.kind, &a.address) == identity(&b.kind, &b.address)
 }
 
+/// What a `url` source's add may have had that changes how its address is read, kept in `extra`
+/// for adding it again with `layer.addUrl`: a service's features are read page by page, a WCS
+/// coverage in the system it was asked in (`coverageCrs`, kept with it).
+pub const URL_FLAGS: [&str; 2] = ["service", "coverage"];
+
+/// A flag as `extra` keeps it: its values are text.
+const FLAG_ON: &str = "true";
+
 impl Source {
+    /// Whether the add this source records had `flag` (one of [`URL_FLAGS`]).
+    pub fn flag(&self, flag: &str) -> bool {
+        self.extra.get(flag).and_then(Value::as_str) == Some(FLAG_ON)
+    }
+
     /// A source's identity: its kind and address. Everywhere a list is matched (kept, forgotten,
     /// noted as recent, shown as a favourite) it is by this; `extra` (a layer, a service type)
     /// is what the last one kept said.
@@ -923,15 +936,21 @@ pub fn added_by(id: &str, p: &Value) -> Option<Source> {
     match id {
         "layer.addData" => Some(src("file", text(p, "path")?, text(p, "name"), layer("layer"))),
         "layer.addUrl" | "layer.addDownload" => {
-            let mut extra = layer("layer");
-            // A service's features are read page by page; adding the address again without the
-            // flag would read only the first page.
-            if p.get("service").and_then(crate::cmd::bool_value) == Some(true) {
-                extra = json!({"service": "true"});
-                if let Some(l) = text(p, "layer") {
-                    extra["layer"] = json!(l);
+            let mut extra = serde_json::Map::new();
+            if let Some(l) = text(p, "layer") {
+                extra.insert("layer".into(), json!(l));
+            }
+            for flag in URL_FLAGS {
+                if p.get(flag).and_then(crate::cmd::bool_value) == Some(true) {
+                    extra.insert(flag.into(), json!(FLAG_ON));
                 }
             }
+            if extra.contains_key("coverage")
+                && let Some(crs) = text(p, "coverageCrs")
+            {
+                extra.insert("coverageCrs".into(), json!(crs));
+            }
+            let extra = if extra.is_empty() { Value::Null } else { Value::Object(extra) };
             Some(src("url", text(p, "url")?, text(p, "name"), extra))
         }
         "map.addTiles" => {
@@ -1712,6 +1731,12 @@ MIIE
         assert_eq!(added_by("layer.addUrl", &service).unwrap().extra, json!({"service": "true"}));
         assert_eq!(clean(added_by("layer.addDownload", &service).unwrap()).unwrap().extra, json!({"service": "true"}));
         assert_eq!(added_by("layer.addUrl", &json!({"url": "https://h/a.geojson", "service": false})).unwrap().extra, Value::Null);
+        let coverage = json!({"url": "https://h/wcs?REQUEST=GetCoverage", "coverage": true, "coverageCrs": "EPSG:2056"});
+        let kept = clean(added_by("layer.addDownload", &coverage).unwrap()).unwrap();
+        assert_eq!(kept.extra, json!({"coverage": "true", "coverageCrs": "EPSG:2056"}));
+        assert!(kept.flag("coverage") && !kept.flag("service"));
+        // A system without the coverage flag isn't one the address is read in.
+        assert_eq!(added_by("layer.addUrl", &json!({"url": "https://h/a.tif", "coverageCrs": "EPSG:2056"})).unwrap().extra, Value::Null);
         assert!(added_by("layer.remove", &json!({})).is_none());
         assert!(added_by("layer.addData", &json!({})).is_none());
         assert!(library().iter().all(|(_, s)| clean(s.clone()).is_ok()));

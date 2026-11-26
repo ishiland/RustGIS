@@ -311,4 +311,8 @@ fn a_coverage_answer_without_its_system_is_read_in_the_one_asked_for() {
     assert_eq!(crs_of(&s, &added["layer"]), lv95);
     let added = s.run("layer.addUrl", &json!({"url": unsaid, "name": "Given", "coverage": true, "coverageCrs": "EPSG:2056"})).unwrap();
     assert_eq!(crs_of(&s, &added["layer"]), lv95);
+    // Recent keeps both, so adding it again reads it in the same system.
+    let recent = &s.run("sources.list", &serde_json::Value::Null).unwrap()["recent"][0];
+    assert_eq!((&recent["address"], &recent["extra"]), (&json!(unsaid), &json!({"coverage": "true", "coverageCrs": "EPSG:2056"})));
+    assert_eq!(recent["addWith"], "layer.addUrl {url, coverage: true, coverageCrs}");
 }
