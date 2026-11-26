@@ -153,7 +153,9 @@ pub fn open(app: &mut RustGisApp, s: &Source) -> Result<(), String> {
                     p[flag] = json!(true);
                 }
             }
-            if let Some(crs) = text(x, "coverageCrs") {
+            if s.flag("coverage")
+                && let Some(crs) = text(x, "coverageCrs")
+            {
                 p["coverageCrs"] = json!(crs);
             }
             app.run("ui.addUrl", p).map(|_| ())
