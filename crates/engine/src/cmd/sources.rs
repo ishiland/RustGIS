@@ -44,7 +44,7 @@ fn add_with(s: &Source) -> String {
     let mut keys = vec!["url".to_string()];
     if s.kind == "url" {
         keys.extend(URL_FLAGS.iter().filter(|f| s.flag(f)).map(|f| format!("{f}: true")));
-        if s.extra.get("coverageCrs").is_some() {
+        if s.flag("coverage") && s.extra.get("coverageCrs").is_some() {
             keys.push("coverageCrs".into());
         }
     }
